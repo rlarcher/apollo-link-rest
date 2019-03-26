@@ -832,9 +832,9 @@ describe('Can customize/parse the response before passing to Apollo', () => {
 
       const link = new RestLink({
         uri: '/api',
-        responseTransformer: (data, type) => {
+        responseTransformer: async (response, type) => {
           expect(type).toBe('Post');
-
+          const data = await response.json();
           return data.post;
         },
       });
@@ -866,9 +866,9 @@ describe('Can customize/parse the response before passing to Apollo', () => {
 
       const link = new RestLink({
         uri: '/api',
-        responseTransformer: (data, type) => {
+        responseTransformer: async (response, type) => {
           expect(type).toBe('[Post]');
-
+          const data = await response.json();
           return data.posts;
         },
       });
@@ -892,7 +892,7 @@ describe('Can customize/parse the response before passing to Apollo', () => {
   });
 
   describe('with endpoint level `responseTransformer`', () => {
-    it('handles single record responses', async () => {
+    it('handles single record responses', async done => {
       fetchMock.get('/api/v1/posts/1', {
         meta: {},
         post: posts[1],
@@ -900,13 +900,14 @@ describe('Can customize/parse the response before passing to Apollo', () => {
 
       const link = new RestLink({
         // This is purpsefully wrong so that we verify the endpoint one is called
-        responseTransformer: data => data.record,
+        responseTransformer: () =>
+          done.fail('Should have called endpoint.responseTransformer'),
         endpoints: {
           v1: {
             uri: '/api/v1',
-            responseTransformer: (data, type) => {
+            responseTransformer: async (response, type) => {
               expect(type).toBe('Post');
-
+              const data = await response.json();
               return data.post;
             },
           },
@@ -930,23 +931,24 @@ describe('Can customize/parse the response before passing to Apollo', () => {
           __typename: 'Post',
         },
       });
+      done();
     });
 
-    it('handles multiple record responses', async () => {
+    it('handles multiple record responses', async done => {
       fetchMock.get('/api/v1/posts', {
         meta: {},
         posts,
       });
 
       const link = new RestLink({
-        // This is purpsefully wrong so that we verify the endpoint one is called
-        responseTransformer: data => data.collection,
+        responseTransformer: () =>
+          done.fail('Should have called endpoint.responseTransformer'),
         endpoints: {
           v1: {
             uri: '/api/v1',
-            responseTransformer: (data, type) => {
+            responseTransformer: async (response, type) => {
               expect(type).toBe('[Post]');
-
+              const data = await response.json();
               return data.posts;
             },
           },
@@ -968,6 +970,7 @@ describe('Can customize/parse the response before passing to Apollo', () => {
           { title: 'Respect apollo', __typename: 'Post' },
         ],
       });
+      done();
     });
   });
 });
@@ -1384,6 +1387,73 @@ describe('Query single call', () => {
     expect(data).toMatchObject({
       post: { ...postWithNest, __typename: 'Post' },
     });
+  });
+
+  it('returns an empty object on 204 status', async () => {
+    expect.assertions(1);
+
+    const link = new RestLink({ uri: '/api' });
+
+    fetchMock.get('/api/no-content', {
+      headers: { 'Content-Length': 0 },
+      status: 204,
+      body: { hasNoContent: true },
+    });
+
+    const queryWithNoContent = gql`
+      query noContent {
+        noContentResponse @rest(type: "NoContent", path: "/no-content") {
+          hasNoContent
+        }
+      }
+    `;
+
+    const { data } = await makePromise<Result>(
+      execute(link, {
+        operationName: 'noContent',
+        query: queryWithNoContent,
+      }),
+    );
+
+    expect(data).toMatchObject({
+      noContentResponse: {
+        __typename: 'NoContent',
+        hasNoContent: null,
+      },
+    });
+  });
+
+  it('returns an error on unsuccessful gets with zero Content-Length', async () => {
+    expect.assertions(1);
+
+    const link = new RestLink({ uri: '/api' });
+
+    fetchMock.get('/api/no-content', {
+      headers: { 'Content-Length': 0 },
+      status: 400,
+      body: { hasNoContent: true },
+    });
+
+    const errorWithNoContent = gql`
+      query noContent {
+        noContentResponse @rest(type: "NoContent", path: "/no-content") {
+          hasNoContent
+        }
+      }
+    `;
+
+    try {
+      await makePromise<Result>(
+        execute(link, {
+          operationName: 'noContent',
+          query: errorWithNoContent,
+        }),
+      );
+    } catch (e) {
+      expect(e).toEqual(
+        new Error('Response not successful: Received status code 400'),
+      );
+    }
   });
 });
 
@@ -2137,11 +2207,10 @@ describe('Query options', () => {
 
       const requestCall = fetchMock.calls('/api/post/1')[0];
       expect(orderDupPreservingFlattenedHeaders(requestCall[1])).toEqual([
-        'setup: setup',
-        'setup: in-context duplicate setup',
         'accept: application/json',
         'authorization: 1234',
         'context: context',
+        'setup: setup, in-context duplicate setup',
       ]);
     });
     it('respects context-provided header-merge policy', async () => {
@@ -2258,8 +2327,48 @@ describe('Query options', () => {
         orderedFlattened.push(`${key}: ${value}`);
       });
       expect(orderedFlattened).toEqual([
-        'authorization: initial setup',
-        'authorization: context',
+        'accept: application/json',
+        'authorization: initial setup, context',
+      ]);
+    });
+    it('generates a new headers object if headers are undefined', async () => {
+      const headersMiddleware = new ApolloLink((operation, forward) => {
+        operation.setContext({
+          headers: undefined,
+        });
+        return forward(operation).map(result => {
+          const { headers } = operation.getContext();
+          expect(headers).toBeUndefined();
+          return result;
+        });
+      });
+      const link = ApolloLink.from([
+        headersMiddleware,
+        new RestLink({ uri: '/api', headers: undefined }),
+      ]);
+
+      const post = { id: '1', title: 'Love apollo' };
+      fetchMock.get('/api/post/1', post);
+
+      const postTitleQuery = gql`
+        query postTitle {
+          post(id: "1") @rest(type: "Post", path: "/post/:id") {
+            id
+            title
+          }
+        }
+      `;
+
+      await makePromise<Result>(
+        execute(link, {
+          operationName: 'postTitle',
+          query: postTitleQuery,
+          variables: { id: '1' },
+        }),
+      );
+
+      const requestCall = fetchMock.calls('/api/post/1')[0];
+      expect(orderDupPreservingFlattenedHeaders(requestCall[1])).toEqual([
         'accept: application/json',
       ]);
     });
@@ -2422,6 +2531,7 @@ describe('Mutation', () => {
     afterEach(() => {
       fetchMock.restore();
     });
+
     it('returns an empty object on 204 status', async () => {
       // In truth this test is just for show, because the fetch implementation
       // used in the tests already returns {} from res.json() for 204 responses
@@ -2462,14 +2572,15 @@ describe('Mutation', () => {
         title: null,
       });
     });
-    it('returns an empty object on zero Content-Length', async () => {
+
+    it('returns an empty object on successful posts with zero Content-Length', async () => {
       // In Node.js parsing an empty body doesn't throw an error, so the best test is
       // to provide body data and ensure the zero length still triggers the empty response
       expect.assertions(1);
 
       const link = new RestLink({ uri: '/api' });
-
       const post = { id: '1', title: 'Love apollo' };
+
       fetchMock.post('/api/posts', {
         headers: { 'Content-Length': 0 },
         body: post,
@@ -2488,6 +2599,7 @@ describe('Mutation', () => {
           }
         }
       `;
+
       const response = await makePromise<Result>(
         execute(link, {
           operationName: 'publishPost',
@@ -2502,6 +2614,82 @@ describe('Mutation', () => {
         title: null,
       });
     });
+
+    it('returns an error on unsuccessful posts with zero Content-Length', async () => {
+      expect.assertions(1);
+
+      const link = new RestLink({ uri: '/api' });
+
+      fetchMock.post('/api/posts', {
+        headers: { 'Content-Length': 0 },
+        status: 400,
+      });
+
+      const createPostMutation = gql`
+        fragment PublishablePostInput on REST {
+          title: String
+        }
+
+        mutation publishPost($input: PublishablePostInput!) {
+          publishedPost(input: $input)
+            @rest(type: "Post", path: "/posts", method: "POST") {
+            title
+          }
+        }
+      `;
+
+      try {
+        await makePromise<Result>(
+          execute(link, {
+            operationName: 'publishPost',
+            query: createPostMutation,
+            variables: { input: { title: null } },
+          }),
+        );
+      } catch (e) {
+        expect(e).toEqual(
+          new Error('Response not successful: Received status code 400'),
+        );
+      }
+    });
+  });
+
+  it('returns an error on zero Content-Length but status > 300', async () => {
+    expect.assertions(1);
+
+    const link = new RestLink({ uri: '/api' });
+
+    const post = { id: '1', title: 'Love apollo' };
+    fetchMock.post('/api/posts', {
+      headers: { 'Content-Length': 0 },
+      status: 500,
+      body: post,
+    });
+
+    const createPostMutation = gql`
+      fragment PublishablePostInput on REST {
+        title: String
+      }
+
+      mutation publishPost($input: PublishablePostInput!) {
+        publishedPost(input: $input)
+          @rest(type: "Post", path: "/posts", method: "POST") {
+          id
+          title
+        }
+      }
+    `;
+    return await makePromise<Result>(
+      execute(link, {
+        operationName: 'publishPost',
+        query: createPostMutation,
+        variables: { input: { title: post.title } },
+      }),
+    ).catch(e =>
+      expect(e).toEqual(
+        new Error('Response not successful: Received status code 500'),
+      ),
+    );
   });
 
   describe('fieldNameDenormalizer', () => {
@@ -2620,6 +2808,56 @@ describe('Mutation', () => {
   describe('bodyKey/bodyBuilder', () => {
     afterEach(() => {
       fetchMock.restore();
+    });
+    it("if using the regular JSON bodyBuilder it doesn't stack multiple content-type headers", async () => {
+      const CUSTOM_JSON_CONTENT_TYPE = 'my-custom-json-ish-content-type';
+
+      const link = new RestLink({
+        uri: '/api',
+        headers: { 'Content-Type': CUSTOM_JSON_CONTENT_TYPE },
+      });
+      const post = {
+        id: '1',
+        title: 'Love apollo',
+        items: [{ name: 'first' }, { name: 'second' }],
+      };
+
+      fetchMock.post('/api/posts/newComplexPost', post);
+
+      const createPostMutation = gql`
+        fragment Item on any {
+          name: String
+        }
+
+        fragment PublishablePostInput on REST {
+          id: String
+          title: String
+          items {
+            ...Item
+          }
+        }
+
+        mutation publishPost($input: PublishablePostInput!) {
+          publishedPost(input: $input)
+            @rest(type: "Post", path: "/posts/newComplexPost", method: "POST") {
+            id
+            title
+            items
+          }
+        }
+      `;
+
+      await makePromise<Result>(
+        execute(link, {
+          operationName: 'publishPost',
+          query: createPostMutation,
+          variables: { input: post },
+        }),
+      );
+      const requestCall = fetchMock.calls('/api/posts/newComplexPost')[0];
+      expect(requestCall[1].headers.get('content-type')).toEqual(
+        CUSTOM_JSON_CONTENT_TYPE,
+      );
     });
     it('builds request body containing Strings/Objects/Arrays types without changing their types', async () => {
       // tests convertObjectKeys functionality
@@ -2781,6 +3019,67 @@ describe('Mutation', () => {
             }),
           ),
         }),
+      );
+    });
+    it('builds a request body for query operations', async () => {
+      expect.assertions(3);
+
+      const link = new RestLink({ uri: '/api' });
+      const post = { id: '1', title: 'This does not feel very RESTful.' };
+      const resultPost = { __typename: 'Post', ...post };
+      fetchMock.post('/api/post-to-get-post', post);
+
+      const getPostQuery = gql`
+        query getPost($id: ID!) {
+          post(input: { id: $id })
+            @rest(type: "Post", path: "/post-to-get-post", method: "POST") {
+            id
+            title
+          }
+        }
+      `;
+
+      const response = await makePromise<Result>(
+        execute(link, {
+          operationName: 'getPost',
+          query: getPostQuery,
+          variables: { id: '1' },
+        }),
+      );
+
+      expect(response.data.post).toEqual(resultPost);
+
+      const requestCall = fetchMock.calls('/api/post-to-get-post')[0];
+      expect(requestCall[1]).toEqual(
+        expect.objectContaining({ method: 'POST' }),
+      );
+      expect(requestCall[1].body).toEqual(JSON.stringify({ id: '1' }));
+    });
+    it('throws when no body input is provided for HTTP methods other than GET or DELETE', async () => {
+      expect.assertions(1);
+
+      const link = new RestLink({ uri: '/api' });
+
+      const createPostMutation = gql`
+        mutation createPost {
+          sendPost @rest(type: "Post", path: "/posts/new", method: "POST") {
+            id
+            title
+          }
+        }
+      `;
+
+      await makePromise<Result>(
+        execute(link, {
+          operationName: 'createPost',
+          query: createPostMutation,
+        }),
+      ).catch(e =>
+        expect(e).toEqual(
+          new Error(
+            '[GraphQL POST mutation using a REST call without a body]. No `input` was detected. Pass bodyKey, or bodyBuilder to the @rest() directive to resolve this.',
+          ),
+        ),
       );
     });
     // TODO: Test for BodyBuilder using context
@@ -3009,6 +3308,103 @@ describe('Mutation', () => {
       );
       expect(secondRequestCall[1].body).toEqual(
         expect.objectContaining({ isFake: true }),
+      );
+    });
+
+    it('returns the original object if the body serializers have a File or FileList object', async () => {
+      expect.assertions(3);
+      const link = new RestLink({
+        uri: '/api',
+        bodySerializers: {
+          upFiles: (body, headers) => ({
+            body,
+            headers,
+          }),
+        },
+      });
+
+      // define a File object
+      const file = new File(['Love apollo'], 'apollo.txt', {
+        type: 'text/plain',
+      });
+      //mocking FileList object
+      const mockFileList = Object.create(FileList.prototype);
+      Object.defineProperty(mockFileList, 'item', {
+        value: function(number: number) {
+          return mockFileList[number];
+        },
+        writable: false,
+        enumerable: true,
+        configurable: false,
+      });
+      Object.defineProperty(mockFileList, 'length', {
+        value: 1,
+        writable: false,
+        enumerable: true,
+        configurable: false,
+      });
+      mockFileList[0] = file;
+
+      //body containing Primitives, Objects and Arrays types
+      const post = {
+        id: '1',
+        title: 'Love apollo',
+        items: [{ name: 'first' }, { name: 'second' }],
+        attachments: mockFileList,
+        cover: file,
+      };
+
+      fetchMock.post('/api/posts/newComplexPost', post);
+
+      const createPostMutation = gql`
+        fragment Item on any {
+          name: String
+        }
+
+        fragment PublishablePostInput on REST {
+          id: String
+          title: String
+          items {
+            ...Item
+          }
+          cover: File
+          attachment: FileList
+        }
+
+        mutation publishPost($input: PublishablePostInput!) {
+          publishedPost(input: $input)
+            @rest(
+              type: "Post"
+              path: "/posts/newComplexPost"
+              method: "POST"
+              bodySerializer: "upFiles"
+            ) {
+            id
+            title
+            items
+            cover
+            attachments
+          }
+        }
+      `;
+
+      await makePromise<Result>(
+        execute(link, {
+          operationName: 'publishPost',
+          query: createPostMutation,
+          variables: { input: post },
+        }),
+      );
+
+      const requestCall = fetchMock.calls('/api/posts/newComplexPost')[0];
+      expect(requestCall[1]).toEqual(
+        expect.objectContaining({ method: 'POST' }),
+      );
+      expect(requestCall[1].body).toEqual(
+        expect.objectContaining({ cover: file }),
+      );
+      expect(requestCall[1].body).toEqual(
+        expect.objectContaining({ attachments: mockFileList }),
       );
     });
 

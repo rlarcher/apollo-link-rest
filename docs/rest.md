@@ -28,10 +28,10 @@ For an apollo client to work, you need a link and a cache, [more info here](/doc
 npm install --save apollo-cache-inmemory
 ```
 
-Then it is time to install our link:
+Then it is time to install our link and its `peerDependencies`:
 
 ```bash
-npm install apollo-link-rest --save
+npm install apollo-link-rest apollo-link graphql graphql-anywhere--save
 ```
 
 After this, you are ready to setup your apollo client:
@@ -42,7 +42,7 @@ import { InMemoryCache } from 'apollo-cache-inmemory';
 import { RestLink } from 'apollo-link-rest';
 
 // setup your `RestLink` with your endpoint
-const link = new RestLink({ uri: "https://swapi.co/api/" });
+const restLink = new RestLink({ uri: "https://swapi.co/api/" });
 
 // setup your client
 const client = new ApolloClient({
@@ -92,7 +92,7 @@ Construction of `RestLink` takes an options object to customize the behavior of 
 * `typePatcher: /map-of-functions/`: _optional_ Structure to allow you to specify the `__typename` when you have nested objects in your REST response!
 * `defaultSerializer /function/`: _optional_ function that will be used by the `RestLink` as the default serializer when no `bodySerializer` is defined for a `@rest` call. The function will also be passed the current `Header` set, which can be updated before the request is sent to `fetch`. Default method uses `JSON.stringify` and sets the `Content-Type` to `application/json`.
 * `bodySerializers: /map-of-functions/`: _optional_ Structure to allow the definition of alternative serializers, which can then be specified by their key.
-- `responseTransformer?: /function/`: _optional_ Apollo expects a record response to return a root object, and a collection of records response to return an array of objects. Use this function to structure the response into the format Apollo expects if your response data is structured differently.
+* `responseTransformer?: /function/`: _optional_ Apollo expects a record response to return a root object, and a collection of records response to return an array of objects. Use this function to structure the response into the format Apollo expects if your response data is structured differently.
 
 
 <h3 id="options.endpoints">Multiple endpoints</h3>
@@ -151,7 +151,7 @@ query MyQuery {
 }
 ```
 
-The outer response object (`data.planets`) gets its `__typename: "PlanetPayload"` from the [`@rest(...)` directive's `type` parameter](#rest). You, however, need to have a way to set the typename of `PlanetPayload.results`.
+The outer response object (`data.planets`) gets its `__typename: "PlanetPayload"` from the [`@rest(...)` directive's `type` parameter](#rest). You, however, need to have a way to set the typename of `PlanetPayload.results`. 
 
 One way you can do this is by providing a `typePatcher`:
 
@@ -278,16 +278,9 @@ And when fetching for a list of users (`/users`), the following response is expe
 ]
 ```
 
-If the structure of your API responses differs than what Apollo expects, you can define a `responseTransformer` in the client. This function receives the JSON response as the 1st argument, and the current `typeName` as the 2nd argument.
+If the structure of your API responses differs than what Apollo expects, you can define a `responseTransformer` in the client. This function receives the response object as the 1st argument, and the current `typeName` as the 2nd argument. It should return a `Promise` as it will be responsible for reading the response stream by calling one of `json()`, `text()` etc.
 
-```js
-const link = new RestLink({
-  uri: '/api',
-  responseTransformer: response => response.data,
-});
-```
-
-With the previously defined transformer, the following response structure would be supported.
+For instance if the record is not at the root level:
 
 ```json
 {
@@ -305,6 +298,26 @@ With the previously defined transformer, the following response structure would 
 }
 ```
 
+The following transformer could be used to support it:
+
+
+```js
+const link = new RestLink({
+  uri: '/api',
+  responseTransformer: async response => response.json().then(({data}) => data),
+});
+```
+
+Plaintext, or XML, or otherwise-encoded responses can be handled by manually parsing and converting them to JSON (using the previously described format that Apollo expects):
+
+```js
+const link = new RestLink({
+  uri: '/xmlApi',
+  responseTransformer: async response => response.text().then(text => parseXmlResponseToJson(text)),
+});
+
+```
+
 <h3 id="options.responseTransformer.endpoints">Custom endpoint responses</h3>
 
 The client level `responseTransformer` applies for all responses, across all URIs and endpoints. If you need a custom `responseTransformer` per endpoint, you can define an object of options for that specific endpoint.
@@ -314,17 +327,50 @@ const link = new RestLink({
   endpoints: {
     v1: {
       uri: '/v1',
-      responseTransformer: response => response.data,
+      responseTransformer: async response => response.data,
     },
     v2: {
       uri: '/v2',
-      responseTransformer: (response, typeName) => response[typeName],
+      responseTransformer: async (response, typeName) => response[typeName],
     },
   },
 });
 ```
 
 > When using the object form, the `uri` field is required.
+
+<h3 id=options.example.customFetch>Custom Fetch</h3>
+
+By default, Apollo uses the browsers `fetch` method to handle `REST` requests to your domain/endpoint. The `customFetch` option allows you to specify _your own_ request handler by defining a function that returns a `Promise` with a fetch-response-like object:
+```js
+const link = new RestLink({
+  endpoints: "/api",
+  customFetch: (uri, options) => new Promise((resolve, reject) => {
+    // Your own (asynchronous) request handler
+    resolve(responseObject)
+  }),
+});
+```
+
+To resolve your GraphQL queries quickly, Apollo will issue requests to relevant endpoints as soon as possible. This is generally ok, but can lead to large numbers of `REST` requests to be fired at once; especially for deeply nested queries [(see `@export` directive)](#export). 
+
+> Some endpoints (like public APIs) might enforce _rate limits_, leading to failed responses and unresolved queries in such cases.
+
+By example, `customFetch` is a good place to manage your apps fetch operations. The following implementation makes sure to only issue 2 requests at a time (concurrency) while waiting at least 500ms until the next batch of requests is fired. 
+```js
+import pThrottle from "p-throttle";
+
+const link = new RestLink({
+  endpoints: "/api",
+  customFetch: pThrottle((uri, config) => {
+      return fetch(uri, config);
+    },
+    2, // Max. concurrent Requests
+    500 // Min. delay between calls
+  ),
+});
+```
+> Since Apollo issues `Promise` based requests, we can resolve them as we see fit. This example uses [`pThrottle`](https://github.com/sindresorhus/p-throttle); part of the popular [promise-fun](https://github.com/sindresorhus/promise-fun) collection.
 
 <h3 id=options.example>Complete options</h3>
 
@@ -333,7 +379,7 @@ Here is one way you might customize `RestLink`:
 ```js
   import fetch from 'node-fetch';
   import * as camelCase from 'camelcase';
-  import * as snake_case from 'snack-case';
+  import * as snake_case from 'snake-case';
 
   const link = new RestLink({
     endpoints: { github: 'github.com' },
@@ -343,7 +389,7 @@ Here is one way you might customize `RestLink`:
       "Content-Type": "application/json"
     },
     credentials: "same-origin",
-    fieldNameNormalizer: (key: string) => camelCase(name),
+    fieldNameNormalizer: (key: string) => camelCase(key),
     fieldNameDenormalizer: (key: string) => snake_case(key),
     typePatcher: {
       Post: ()=> {

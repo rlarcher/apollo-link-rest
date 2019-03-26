@@ -4,6 +4,39 @@
 
 ### v0.next
 
+### v0.7.1
+
+* Fix: Duplicated Content Type Header [#188](https://github.com/apollographql/apollo-link-rest/pull/188)
+* Fix: FileList Support [#183](https://github.com/apollographql/apollo-link-rest/pull/183)
+* Fix: Default Empty object when creating headers [#178](https://github.com/apollographql/apollo-link-rest/pull/178)
+* Body-containing Queries [#173](https://github.com/apollographql/apollo-link-rest/pull/173)
+
+### v0.7.0 - Breaking!
+
+#### Breaking changes around `responseTransformer!`
+
+In this [PR #165](https://github.com/apollographql/apollo-link-rest/pull/165), we realized that the `responseTransformer` feature added last release wasn't broad enough, `responseTransformer`s now receive the raw response stream instead of just the `json()`-promise.
+
+Code which relies on this feature will break, however the fix should be very simple:
+
+    Either the responseTransformer function is made `async` and to `await response.json()`, *or* if this syntax is not available, the existing code needs to be wrapped in `response.json().then(data => {/* existing implementation */})`.
+
+#### Other Changes
+
+* Remove restriction that only allows request bodies to be built for Mutation operations. [#154](https://github.com/apollographql/apollo-link-rest/issues/154) & [#173](https://github.com/apollographql/apollo-link-rest/pull/173)
+* Fix code sandbox examples [#177](https://github.com/apollographql/apollo-link-rest/pull/177)
+* Bug-fix: default to empty headers instead of undefined for IE [#178](https://github.com/apollographql/apollo-link-rest/pull/178)
+* Various docs typo fixes
+
+
+### v0.6.0
+
+* Feature: responseTransformers allow you to restructure & erase "wrapper" objects from your responses. [#146](https://github.com/apollographql/apollo-link-rest/pull/146)
+* Tweaks to config for prettier [#153](https://github.com/apollographql/apollo-link-rest/pull/153) & jest [#158](https://github.com/apollographql/apollo-link-rest/pull/158)
+* Tests for No-Content responses [#157](https://github.com/apollographql/apollo-link-rest/pull/157) & [#161](https://github.com/apollographql/apollo-link-rest/pull/161)
+* Bundle Size-Limit Increased [#162](https://github.com/apollographql/apollo-link-rest/pull/162)
+* Restructure Code for preferring `await` over Promise-chains [#159](https://github.com/apollographql/apollo-link-rest/pull/159)
+
 ### v0.5.0
 
 * Breaking Change: 404s now no longer throw an error! It's just null data! [#142](https://github.com/apollographql/apollo-link-rest/pull/142)
